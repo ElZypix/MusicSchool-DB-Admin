@@ -1,17 +1,21 @@
 import sys
+import os
+from dotenv import load_dotenv
 from PyQt6.QtWidgets import QApplication
 from db.databaseManager import DatabaseManager
 from Gui.LoginWindows import LoginWindow
 from Gui.ControlWindows import ControlWindows
 import logging
 
+load_dotenv()
+
 class MainApplication():
     def __init__(self):
         self.db_manager = DatabaseManager(
-            host='localhost',
-            user='root',
-            password='321f4899721M56_',
-            database='bdPracticaC4_1'
+            host=os.getenv('DB_HOST'),
+            user=os.getenv('DB_USER'),
+            password=os.getenv('DB_PASSWORD'),
+            database='DB_NAME'
         )
         self.login_win = LoginWindow(self.db_manager)
         self.control_win = ControlWindows(self.db_manager)

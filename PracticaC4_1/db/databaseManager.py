@@ -1,7 +1,5 @@
-import mysql.connector
-from mysql.connector import Error
+import pymysql
 import logging
-
 class DatabaseManager:
 
     def __init__(self, host, database, user, password):
@@ -13,25 +11,33 @@ class DatabaseManager:
         self.connect()
 
     def connect(self):
-        """Establece la conexión con la base de datos."""
+        """Establece la conexión con la base de datos usando PyMySQL."""
         try:
-            self.connection = mysql.connector.connect(
+            self.connection = pymysql.connect(
                 host=self.host,
-                database=self.database,
                 user=self.user,
                 password=self.password,
-                autocommit=True
+                database=self.database,
+                autocommit=True,
+                # Esto permite que execute acepte %s como placeholder igual que el anterior
+                cursorclass=pymysql.cursors.Cursor
             )
-            if self.connection.is_connected():
-                print("Conexión exitosa a MariaDB")
-        except Error as e:
+            if self.is_connected():
+                print("Conexión exitosa a MariaDB (vía PyMySQL)")
+        except pymysql.Error as e:
             print(f"Error al conectar con MariaDB: {e}")
             logging.error(f"Error al conectar con MariaDB: {e}")
             self.connection = None
 
+    def is_connected(self):
+        """Verifica si la conexión está abierta (Compatible con PyMySQL)."""
+        if self.connection and self.connection.open:
+            return True
+        return False
+
     def validar_usuario(self, login, password):
-        if not self.connection or not self.connection.is_connected():
-            return None  # Error de conexión
+        if not self.is_connected():
+            return None
 
         cursor = self.connection.cursor()
         query = """
@@ -60,10 +66,9 @@ class DatabaseManager:
 
             if resultado is None:
                 return -1
-
             return resultado
 
-        except Error as e:
+        except pymysql.Error as e:
             print(f"ERROR EN LA CONSULTA DE VALIDACIÓN: {e}")
             logging.error(f"Error en validar_usuario (Login: {login}): {e}")
             return None
@@ -71,19 +76,14 @@ class DatabaseManager:
             cursor.close()
 
     def actualizar_estado_cuenta(self, cv_user, nuevo_estado):
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             print("Error: No hay conexión a la base de datos.")
             return False
 
         cursor = self.connection.cursor()
-        query = """
-            UPDATE mUsuario
-            SET EdoCta = %s
-            WHERE CvUser = %s;
-        """
+        query = "UPDATE mUsuario SET EdoCta = %s WHERE CvUser = %s;"
         try:
             cursor.execute(query, (nuevo_estado, cv_user))
-
             self.connection.commit()
 
             if cursor.rowcount > 0:
@@ -93,7 +93,7 @@ class DatabaseManager:
                 print(f"No se encontró el CvUser {cv_user} para actualizar.")
                 return False
 
-        except Error as e:
+        except pymysql.Error as e:
             print(f"ERROR AL ACTUALIZAR: {e}")
             logging.error(f"Error en actualizar_estado_cuenta (CvUser: {cv_user}): {e}")
             self.connection.rollback()
@@ -102,14 +102,11 @@ class DatabaseManager:
             cursor.close()
 
     def registrar_acceso(self, usuario_intento, exito, detalle_evento, ip_address="192.168.0.225"):
-        """Registra eventos de auditoría con la IP."""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             print("Error no hay conexion en la base de datos para la bitacora.")
             return False
 
         cursor = self.connection.cursor()
-
-        # Actualizamos el query para incluir la IP
         query = """
         INSERT INTO bitacora_accesos
             (usuario_intento, direccion_ip, fecha_hora, exito, detalle_evento)
@@ -117,27 +114,19 @@ class DatabaseManager:
             (%s, %s, NOW(), %s, %s);"""
 
         try:
-            # Pasamos la IP a la tupla de datos
-            datos = (usuario_intento, ip_address, exito, detalle_evento)
+            datos = (usuario_intento, ip_address, 1 if exito else 0, detalle_evento)
             cursor.execute(query, datos)
-
             self.connection.commit()
-            # print(f"Log guardado: {usuario_intento} ({ip_address}) - {detalle_evento}")
             return True
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error en mostrar en bitacora: {e}")
-            # No hacemos rollback aquí porque esto suele ser una operación aislada
             return False
         finally:
             cursor.close()
 
     def verificar_password_existente(self, nuevo_password):
-        """
-        Verifica si un password ya existe en la tabla mUsuario.
-        Retorna True si existe, False si no existe.
-        """
-        if not self.connection or not self.connection.is_connected():
-            return True  # Por seguridad, si no hay BD, no dejamos cambiar
+        if not self.is_connected():
+            return True
 
         cursor = self.connection.cursor()
         query = "SELECT CvUser FROM mUsuario WHERE Password = %s;"
@@ -145,52 +134,39 @@ class DatabaseManager:
         try:
             cursor.execute(query, (nuevo_password,))
             resultado = cursor.fetchone()
-
-            # Si fetchone() encuentra algo (no es None), significa que SÍ existe
             return resultado is not None
-
-        except Error as e:
+        except pymysql.Error as e:
             print(f"ERROR AL VERIFICAR PASSWORD: {e}")
-            return True  # Por seguridad, bloqueamos el cambio
+            return True
         finally:
             cursor.close()
 
     def actualizar_password(self, login_usuario, nuevo_password):
-        """
-        Actualiza la contraseña de un usuario específico Y REGISTRA EN BITACORA.
-        """
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             print("Error: No hay conexión a la base de datos.")
             return False
 
         cursor = self.connection.cursor()
-        query = """
-            UPDATE mUsuario
-            SET Password = %s
-            WHERE Login = %s;
-        """
+        query = "UPDATE mUsuario SET Password = %s WHERE Login = %s;"
         try:
             cursor.execute(query, (nuevo_password, login_usuario))
             self.connection.commit()
 
-            # --- INICIO DE AUDITORÍA DE SEGURIDAD ---
             detalle_evento = "AUDITORIA SEGURIDAD: Cambio de contraseña exitoso."
             self.registrar_acceso(login_usuario, True, detalle_evento)
-            # --- FIN DE AUDITORÍA ---
 
-            return cursor.rowcount > 0  # Retorna True si la fila fue actualizada
+            return cursor.rowcount > 0
 
-        except Error as e:
+        except pymysql.Error as e:
             print(f"ERROR AL ACTUALIZAR PASSWORD: {e}")
             self.connection.rollback()
             return False
         finally:
             cursor.close()
 
-    #Pagos
+    # --- Pagos ---
     def get_pagos_por_usuario(self, cv_user):
-        """Obtiene todos los pagos de un usuario específico (para Alumnos)"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return []
 
         query = """
@@ -207,17 +183,16 @@ class DatabaseManager:
         """
         cursor = self.connection.cursor()
         try:
-            cursor.execute(query, (cv_user))
+            cursor.execute(query, (cv_user,))
             return cursor.fetchall()
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al obtener pagos por usuario: {e}")
             return []
         finally:
             cursor.close()
 
     def get_todos_los_pagos(self):
-        """Obtine todos los pagos (para Directores/Admin)"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return []
         query = """
         SELECT 
@@ -235,15 +210,14 @@ class DatabaseManager:
         try:
             cursor.execute(query)
             return cursor.fetchall()
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al obtener todos los pagos: {e}")
             return []
         finally:
             cursor.close()
 
     def get_alumnos_para_combobox(self):
-        """Obtiene todos los alumnos (ID, Nombre) para llenar el combobox"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return []
         query = """
             SELECT 
@@ -262,75 +236,66 @@ class DatabaseManager:
         try:
             cursor.execute(query)
             return cursor.fetchall()
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al obtener la lista de alumnos: {e}")
             return []
         finally:
             cursor.close()
 
     def add_pago(self, cv_usuario, fecha, tipo, monto, descuento, estado, admin_login):
-        """Insertar un nuevo registro de pago en fCobro Y REGISTRA EN BITACORA."""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return False
         query = """
                 INSERT INTO fCobro (CvUsuario, FechaCobro, Tipo, Monto, Descuento, Estado)
-                VALUES (%s, %s, %s, %s, %s, %s); \
+                VALUES (%s, %s, %s, %s, %s, %s);
                 """
         cursor = self.connection.cursor()
         try:
             cursor.execute(query, (cv_usuario, fecha, tipo, monto, descuento, estado))
             self.connection.commit()
 
-            # --- INICIO DE AUDITORÍA ---
-            # Obtenemos el ID del pago que acabamos de insertar
             nuevo_pago_id = cursor.lastrowid
             detalle_evento = f"AUDITORIA BD: INSERT en fCobro. ID: {nuevo_pago_id}, Alumno ID: {cv_usuario}"
             self.registrar_acceso(admin_login, True, detalle_evento)
-            # --- FIN DE AUDITORÍA ---
 
             return True
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al añadir pago {e}")
-            self.connection.rollback()  # <--- ¡IMPORTANTE! Asegúrate de tener rollback aquí
+            self.connection.rollback()
             return False
         finally:
             cursor.close()
 
     def get_tipos_pago(self):
-        """Obtiene todos los tipos de pago (ID, Nombre, Monto) para el ComboBox."""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return []
-
         query = "SELECT CvTipoPago, DsTipoPago, Monto FROM cTiposPago ORDER BY DsTipoPago;"
         cursor = self.connection.cursor()
         try:
             cursor.execute(query)
             return cursor.fetchall()
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al obtener tipos de pago: {e}")
             return []
         finally:
             cursor.close()
 
     def get_descuentos(self):
-        """Obtiene todos los descuentos (ID, Nombre, Porcentaje) para el ComboBox."""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return []
-
         query = "SELECT CvDescuento, DsDescuento, Porcentaje FROM cDescuentos ORDER BY Porcentaje;"
         cursor = self.connection.cursor()
         try:
             cursor.execute(query)
             return cursor.fetchall()
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al obtener descuentos: {e}")
             return []
         finally:
             cursor.close()
 
     def update_pago(self, cv_cobro, cv_usuario, fecha, tipo, monto, descuento, estado, admin_login):
-        """Actualiza un registro de pago existente en fCobro Y REGISTRA EN BITACORA."""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return False
 
         query = """
@@ -348,13 +313,11 @@ class DatabaseManager:
             cursor.execute(query, (cv_usuario, fecha, tipo, monto, descuento, estado, cv_cobro))
             self.connection.commit()
 
-            # --- INICIO DE AUDITORÍA ---
             detalle_evento = f"AUDITORIA BD: UPDATE en fCobro. ID: {cv_cobro}"
             self.registrar_acceso(admin_login, True, detalle_evento)
-            # --- FIN DE AUDITORÍA ---
 
             return True
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al actualizar pago: {e}")
             self.connection.rollback()
             return False
@@ -362,8 +325,7 @@ class DatabaseManager:
             cursor.close()
 
     def delete_pago(self, cv_cobro, admin_login):
-        """Elimina un registro de pago de fCobro Y REGISTRA EN BITACORA."""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return False
 
         query = "DELETE FROM fCobro WHERE CvCobro = %s;"
@@ -372,13 +334,11 @@ class DatabaseManager:
             cursor.execute(query, (cv_cobro,))
             self.connection.commit()
 
-            # --- INICIO DE AUDITORÍA ---
             detalle_evento = f"AUDITORIA BD: DELETE en fCobro. ID: {cv_cobro}"
             self.registrar_acceso(admin_login, True, detalle_evento)
-            # --- FIN DE AUDITORÍA ---
 
             return True
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al eliminar pago: {e}")
             self.connection.rollback()
             return False
@@ -388,40 +348,29 @@ class DatabaseManager:
     # --- FUNCIONES PARA MÓDULO DE PERSONAS ---
 
     def _get_catalog_data(self, query):
-        """Función auxiliar genérica para leer catálogos simples."""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return []
         cursor = self.connection.cursor()
         try:
             cursor.execute(query)
             return cursor.fetchall()
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al obtener catálogo: {e}")
             return []
         finally:
             cursor.close()
 
     def get_generos(self):
-        """Obtiene la lista de géneros (ID, Nombre) de cGenero."""
-        query = "SELECT CvGenero, DsGenero FROM cGenero ORDER BY DsGenero"
-        return self._get_catalog_data(query)
+        return self._get_catalog_data("SELECT CvGenero, DsGenero FROM cGenero ORDER BY DsGenero")
 
     def get_puestos(self):
-        """Obtiene la lista de puestos (ID, Nombre) de cPuesto."""
-        query = "SELECT CvPuesto, DsPuesto FROM cPuesto ORDER BY DsPuesto"
-        return self._get_catalog_data(query)
+        return self._get_catalog_data("SELECT CvPuesto, DsPuesto FROM cPuesto ORDER BY DsPuesto")
 
     def get_tipos_persona(self):
-        """Obtiene la lista de tipos de persona (ID, Nombre) de cTpPerso."""
-        query = "SELECT CvTpPerson, DsTpPerson FROM cTpPerso ORDER BY DsTpPerson"
-        return self._get_catalog_data(query)
+        return self._get_catalog_data("SELECT CvTpPerson, DsTpPerson FROM cTpPerso ORDER BY DsTpPerson")
 
     def get_all_personas_info(self):
-        """
-        Obtiene la información combinada de mDtsPerson y mUsuario
-        para llenar la tabla de consulta.
-        """
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return []
 
         query = """
@@ -446,36 +395,25 @@ class DatabaseManager:
         try:
             cursor.execute(query)
             return cursor.fetchall()
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al obtener toda la info de personas: {e}")
             return []
         finally:
             cursor.close()
 
     def _get_or_create_catalog_id(self, cursor, tabla, pk_col, ds_col, valor_str):
-        """
-        Función auxiliar: Busca un string (ej. "Alan") en una tabla (ej. "cNombre").
-        Si existe, devuelve su ID.
-        Si no existe, lo inserta y devuelve el nuevo ID.
-        """
-        # 1. Buscar si el valor ya existe
         cursor.execute(f"SELECT {pk_col} FROM {tabla} WHERE {ds_col} = %s", (valor_str,))
         resultado = cursor.fetchone()
 
         if resultado:
-            return resultado[0]  # Devolver el ID existente
+            return resultado[0]
         else:
-            # 2. Si no existe, insertarlo
             cursor.execute(f"INSERT INTO {tabla} ({ds_col}) VALUES (%s)", (valor_str,))
-            return cursor.lastrowid  # Devolver el nuevo ID
+            return cursor.lastrowid
 
     def check_login_exists(self, login, current_user_id=None):
-        """
-        Verifica si un login ya existe en mUsuario.
-        Si 'current_user_id' se provee, excluye a ese usuario de la búsqueda (para 'Actualizar').
-        """
-        if not self.connection or not self.connection.is_connected():
-            return True  # Asumir que existe si hay error de BD
+        if not self.is_connected():
+            return True
 
         cursor = self.connection.cursor()
         try:
@@ -486,29 +424,22 @@ class DatabaseManager:
                 query = "SELECT CvUser FROM mUsuario WHERE Login = %s;"
                 cursor.execute(query, (login,))
 
-            return cursor.fetchone() is not None  # True si encuentra algo
-
-        except Error as e:
+            return cursor.fetchone() is not None
+        except pymysql.Error as e:
             print(f"Error al verificar login: {e}")
-            return True  # Bloquear por seguridad
+            return True
         finally:
             cursor.close()
 
     def add_persona_y_usuario(self, datos_persona, datos_usuario, admin_login):
-        """
-        Función transaccional para crear una Persona y un Usuario.
-        'datos_persona' es un dict para mDtsPerson.
-        'datos_usuario' es un dict para mUsuario.
-        """
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return False
 
         cursor = self.connection.cursor()
         try:
-            # ¡Iniciamos una transacción!
-            self.connection.start_transaction()
+            self.connection.begin()  # Inicio de transacción en PyMySQL
 
-            # 1. Obtener/Crear IDs de catálogos de nombres
+            # 1. Catálogos
             cv_nombre = self._get_or_create_catalog_id(cursor, "cNombre", "CvNombre", "DsNombre",
                                                        datos_persona['Nombre'])
             cv_apepat = self._get_or_create_catalog_id(cursor, "cApellid", "CvApellid", "DsApellid",
@@ -517,7 +448,6 @@ class DatabaseManager:
                                                        datos_persona['ApeMat'])
 
             # 2. Insertar en mDtsPerson
-            # --- ¡ESTA ES LA PARTE CORREGIDA! ---
             query_person = """
                            INSERT INTO mDtsPerson
                            (CvNombre, CvApePat, CvApeMat, FecNac, E_mail, Telefono,
@@ -526,20 +456,15 @@ class DatabaseManager:
                             RedSoc, Edad) 
                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 1, 1, 1, %s, %s);
                            """
-            # Se añadieron RedSoc y Edad a la consulta
-
             cursor.execute(query_person, (
                 cv_nombre, cv_apepat, cv_apemat,
                 datos_persona['FecNac'], datos_persona['E_mail'], datos_persona['Telefono'],
                 datos_persona['CvGenero'], datos_persona['CvPuesto'], datos_persona['CvTpPerso'],
-                datos_persona['RedSoc'], datos_persona['Edad'] # Se pasan los nuevos datos
+                datos_persona['RedSoc'], datos_persona['Edad']
             ))
-            # --- FIN DE LA CORRECCIÓN ---
-
-            # 3. Obtener el ID de la nueva persona
             cv_person_nuevo = cursor.lastrowid
 
-            # 4. Insertar en mUsuario (Esta parte no cambia)
+            # 3. Insertar en mUsuario
             query_user = """
                          INSERT INTO mUsuario
                              (CvPerson, Login, Password, FecIni, FecVen, EdoCta)
@@ -551,27 +476,22 @@ class DatabaseManager:
                 datos_usuario['FecIni'], datos_usuario['FecVen'], datos_usuario['EdoCta']
             ))
 
-            # 5. Confirmar todos los cambios
             self.connection.commit()
 
-            # 6. Registrar en Bitácora
             detalle_evento = f"AUDITORIA BD: INSERT en mDtsPerson (ID: {cv_person_nuevo}) y mUsuario (Login: {datos_usuario['Login']})"
             self.registrar_acceso(admin_login, True, detalle_evento)
 
             return True
 
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error en la transacción de añadir persona: {e}")
-            self.connection.rollback()  # ¡Deshacer todo si algo falla!
+            self.connection.rollback()
             return False
         finally:
             cursor.close()
 
     def get_persona_info_by_id(self, cv_user):
-        """
-        Obtiene todos los datos de una persona/usuario específico para llenar el formulario de edición.
-        """
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return None
 
         query = """
@@ -597,29 +517,25 @@ class DatabaseManager:
                          JOIN cApellid am ON dp.CvApeMat = am.CvApellid
                 WHERE u.CvUser = %s;
                 """
-        cursor = self.connection.cursor(dictionary=True)  # <-- Usamos dictionary=True para obtener {col: val}
+        # IMPORTANTE: Usamos DictCursor para obtener resultados como diccionario
+        cursor = self.connection.cursor(pymysql.cursors.DictCursor)
         try:
             cursor.execute(query, (cv_user,))
-            return cursor.fetchone()  # Devuelve un diccionario con los resultados
-        except Error as e:
+            return cursor.fetchone()
+        except pymysql.Error as e:
             print(f"Error al obtener datos de la persona: {e}")
             return None
         finally:
             cursor.close()
 
     def update_persona_y_usuario(self, cv_user, cv_person, datos_persona, datos_usuario, admin_login):
-        """
-        Función transaccional para ACTUALIZAR una Persona y un Usuario.
-        """
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return False
 
         cursor = self.connection.cursor()
         try:
-            # ¡Iniciamos una transacción!
-            self.connection.start_transaction()
+            self.connection.begin()
 
-            # 1. Obtener/Crear IDs de catálogos de nombres
             cv_nombre = self._get_or_create_catalog_id(cursor, "cNombre", "CvNombre", "DsNombre",
                                                        datos_persona['Nombre'])
             cv_apepat = self._get_or_create_catalog_id(cursor, "cApellid", "CvApellid", "DsApellid",
@@ -627,7 +543,6 @@ class DatabaseManager:
             cv_apemat = self._get_or_create_catalog_id(cursor, "cApellid", "CvApellid", "DsApellid",
                                                        datos_persona['ApeMat'])
 
-            # 2. Actualizar mDtsPerson
             query_person = """
                            UPDATE mDtsPerson
                            SET CvNombre  = %s,
@@ -648,10 +563,9 @@ class DatabaseManager:
                 datos_persona['FecNac'], datos_persona['E_mail'], datos_persona['Telefono'],
                 datos_persona['CvGenero'], datos_persona['CvPuesto'], datos_persona['CvTpPerso'],
                 datos_persona['Edad'], datos_persona['RedSoc'],
-                cv_person  # <-- ID de la persona a actualizar
+                cv_person
             ))
 
-            # 3. Actualizar mUsuario
             query_user = """
                          UPDATE mUsuario
                          SET Login    = %s,
@@ -664,35 +578,28 @@ class DatabaseManager:
             cursor.execute(query_user, (
                 datos_usuario['Login'], datos_usuario['Password'],
                 datos_usuario['FecIni'], datos_usuario['FecVen'], datos_usuario['EdoCta'],
-                cv_user  # <-- ID del usuario a actualizar
+                cv_user
             ))
 
-            # 4. Confirmar todos los cambios
             self.connection.commit()
 
-            # 5. Registrar en Bitácora
             detalle_evento = f"AUDITORIA BD: UPDATE en mDtsPerson (ID: {cv_person}) y mUsuario (ID: {cv_user})"
             self.registrar_acceso(admin_login, True, detalle_evento)
 
             return True
 
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error en la transacción de actualizar persona: {e}")
-            self.connection.rollback()  # ¡Deshacer todo si algo falla!
+            self.connection.rollback()
             return False
         finally:
             cursor.close()
 
     def delete_persona_y_usuario(self, cv_user_a_borrar, admin_login):
-        """
-        Elimina una Persona y su Usuario asociado usando ON DELETE CASCADE.
-        """
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return False
 
         cursor = self.connection.cursor()
-
-        # Necesitamos el CvPerson y el Login ANTES de borrar, para la auditoría
         cv_person = None
         login_borrado = None
         try:
@@ -702,41 +609,33 @@ class DatabaseManager:
                 cv_person = resultado[0]
                 login_borrado = resultado[1]
             else:
-                # Si no hay usuario, no hay nada que borrar
                 print(f"No se encontró CvPerson para CvUser {cv_user_a_borrar}")
                 return False
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al buscar CvPerson: {e}")
             return False
 
         try:
-            # ¡Iniciamos una transacción!
-            self.connection.start_transaction()
+            self.connection.begin()
 
-            # 1. Borrar de mDtsPerson
-            # Gracias a "ON DELETE CASCADE", mUsuario se borrará automáticamente.
-            query_person = "DELETE FROM mDtsPerson WHERE CvPerson = %s;"
-            cursor.execute(query_person, (cv_person,))
-
-            # 2. Confirmar el borrado
+            # Al borrar la persona, el usuario se borra por cascada
+            cursor.execute("DELETE FROM mDtsPerson WHERE CvPerson = %s;", (cv_person,))
             self.connection.commit()
 
-            # 3. Registrar en Bitácora
             detalle_evento = f"AUDITORIA BD: DELETE en mDtsPerson (ID: {cv_person}) y mUsuario (Login: {login_borrado})"
             self.registrar_acceso(admin_login, True, detalle_evento)
 
             return True
 
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error en la transacción de eliminar persona: {e}")
-            self.connection.rollback()  # ¡Deshacer todo si algo falla!
+            self.connection.rollback()
             return False
         finally:
             cursor.close()
 
     def registrar_error(self, mensaje_error, modulo, usuario_activo="Desconocido", ip_address="192.168.0.225"):
-        """Guarda un error técnico en la tabla mErrores."""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             print(f"Fallo crítico: No se pudo guardar el error en BD: {mensaje_error}")
             return False
 
@@ -749,32 +648,23 @@ class DatabaseManager:
             cursor.execute(query, (str(mensaje_error), modulo, usuario_activo, ip_address))
             self.connection.commit()
             return True
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al registrar en mErrores: {e}")
             return False
         finally:
             cursor.close()
 
     def get_catalogo_dinamico(self, nombre_tabla, col_id, col_desc):
-        """
-        Consulta dinámica para llenar cualquier catálogo simple.
-        Ej: SELECT CvNombre, DsNombre FROM cNombre;
-        """
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():
             return []
 
-        # Construimos la query usando los nombres de tabla/columnas
-        # (Es seguro porque estos nombres vendrán de nuestro código interno, no del usuario)
         query = f"SELECT {col_id}, {col_desc} FROM {nombre_tabla} ORDER BY {col_desc};"
-
         cursor = self.connection.cursor()
         try:
             cursor.execute(query)
             return cursor.fetchall()
-        except Error as e:
+        except pymysql.Error as e:
             print(f"Error al obtener catálogo dinámico ({nombre_tabla}): {e}")
             return []
         finally:
             cursor.close()
-
-            
