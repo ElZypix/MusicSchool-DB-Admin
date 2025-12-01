@@ -15,7 +15,7 @@ class MainApplication():
             host=os.getenv('DB_HOST'),
             user=os.getenv('DB_USER'),
             password=os.getenv('DB_PASSWORD'),
-            database='DB_NAME'
+            database=os.getenv('DB_NAME')
         )
         self.login_win = LoginWindow(self.db_manager)
         self.control_win = ControlWindows(self.db_manager)
